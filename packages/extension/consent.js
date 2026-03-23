@@ -65,13 +65,19 @@ async function respond(approved) {
   elements.allowBtn.disabled = true;
   elements.denyBtn.disabled = true;
 
-  await sendConsentMessage({
-    action: 'consentResponse',
-    approved,
-    remember: elements.remember.checked,
-  });
+  try {
+    await sendConsentMessage({
+      action: 'consentResponse',
+      approved,
+      remember: elements.remember.checked,
+    });
 
-  window.close();
+    window.close();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : String(error));
+    elements.allowBtn.disabled = false;
+    elements.denyBtn.disabled = false;
+  }
 }
 
 async function init() {

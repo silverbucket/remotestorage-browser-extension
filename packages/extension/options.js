@@ -184,6 +184,13 @@ async function renderOrigins() {
     const meta = document.createElement('div');
     meta.className = 'origin-scopes';
 
+    const statusBadge = document.createElement('span');
+    statusBadge.className = 'badge' + (decision.approved ? ' badge-active' : '');
+    statusBadge.textContent = decision.approved ? 'Allowed' : 'Denied';
+    meta.appendChild(statusBadge);
+
+    meta.appendChild(document.createTextNode(' '));
+
     const scopeBadge = document.createElement('span');
     scopeBadge.className = 'badge-scope';
     scopeBadge.textContent = humanizeScopes(decision.scopes);
