@@ -2,17 +2,14 @@ const elements = {
   accounts: document.querySelector('#accounts'),
   accountsEmpty: document.querySelector('#accounts-empty'),
   accountsPanel: document.querySelector('#accounts-panel'),
-  accountPill: document.querySelector('#account-pill'),
+  accountBadge: document.querySelector('#account-badge'),
   activeAccount: document.querySelector('#active-account'),
+  activeSwitcher: document.querySelector('#active-switcher'),
   addAccount: document.querySelector('#add-account'),
-  metricActive: document.querySelector('#metric-active'),
-  metricMode: document.querySelector('#metric-mode'),
-  phasePill: document.querySelector('#phase-pill'),
+  openOptions: document.querySelector('#open-options'),
+  openSettings: document.querySelector('#open-settings'),
   setActive: document.querySelector('#set-active'),
-  statusDetail: document.querySelector('#status-detail'),
-  statusKind: document.querySelector('#status-kind'),
-  statusMessage: document.querySelector('#status-message'),
-  statusTitle: document.querySelector('#status-title'),
+  toast: document.querySelector('#toast'),
   userAddress: document.querySelector('#user-address'),
 };
 
@@ -21,24 +18,28 @@ const STORAGE_KEYS = {
   activeAccountId: 'activeAccountId',
 };
 
-function setBusy(isBusy, phaseLabel = 'Idle') {
-  document.body.classList.toggle('busy', isBusy);
-  elements.phasePill.textContent = phaseLabel;
-}
+let toastTimer = null;
 
-function formatSummary(value) {
-  if (typeof value === 'string') {
-    return value;
+function showToast(kind, message) {
+  clearTimeout(toastTimer);
+  elements.toast.className = `toast visible toast-${kind}`;
+  elements.toast.textContent = message;
+  if (kind !== 'error') {
+    toastTimer = setTimeout(() => {
+      elements.toast.classList.remove('visible');
+    }, 4000);
   }
-
-  return JSON.stringify(value, null, 2);
 }
 
-function setStatus(kind, title, message, detail = '') {
-  elements.statusKind.textContent = kind;
-  elements.statusTitle.textContent = title;
-  elements.statusMessage.textContent = message;
-  elements.statusDetail.textContent = detail ? formatSummary(detail) : '';
+function hideToast() {
+  clearTimeout(toastTimer);
+  elements.toast.classList.remove('visible');
+}
+
+function setBusy(isBusy) {
+  document.body.classList.toggle('busy', isBusy);
+  elements.addAccount.disabled = isBusy;
+  elements.setActive.disabled = isBusy;
 }
 
 async function sendPopupMessage(payload) {
@@ -72,139 +73,140 @@ async function readStoredState() {
       userAddress: account.userAddress,
     }));
 
-  return {
-    accounts,
-    activeAccountId,
-  };
+  return { accounts, activeAccountId };
 }
 
-function renderSummary(state) {
-  const accounts = state.accounts || [];
-  const activeAccount = accounts.find((account) => account.active) || null;
-
-  elements.metricActive.textContent = activeAccount ? activeAccount.userAddress : 'none selected';
-  elements.metricMode.textContent = accounts.length > 0 ? 'ready for brokered apps' : 'waiting for first account';
-  elements.accountPill.textContent = accounts.length === 0
-    ? 'Empty vault'
-    : `${accounts.length} account${accounts.length === 1 ? '' : 's'}`;
+function getInitial(userAddress) {
+  const name = String(userAddress).split('@')[0] || '?';
+  return name.charAt(0).toUpperCase();
 }
 
-function attachRemoveHandlers() {
-  elements.accounts.querySelectorAll('button[data-remove]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const accountId = button.dataset.remove;
-      if (!accountId) {
-        return;
-      }
-
-      setBusy(true, 'Updating');
-      setStatus('mutation', 'Removing stored account', 'Updating the cached account list after removing this identity.');
-
-      try {
-        const payload = await sendPopupMessage({
-          action: 'removeAccount',
-          accountId,
-        });
-        renderAccounts(payload);
-        setStatus('ready', 'Account removed', 'The extension cache has been updated.', payload);
-      } catch (error) {
-        setStatus('error', 'Could not remove account', error instanceof Error ? error.message : String(error));
-      } finally {
-        setBusy(false);
-      }
-    });
-  });
+function getServerHost(href) {
+  try {
+    return new URL(href).host;
+  } catch {
+    return href;
+  }
 }
 
 function renderAccounts(state) {
   const accounts = state.accounts || [];
-  elements.activeAccount.innerHTML = '';
-  renderSummary(state);
+
+  // Badge
+  elements.accountBadge.textContent = String(accounts.length);
+  if (accounts.some((a) => a.active)) {
+    elements.accountBadge.classList.add('badge-active');
+  } else {
+    elements.accountBadge.classList.remove('badge-active');
+  }
+
+  // Active account switcher
+  elements.activeAccount.textContent = '';
+  if (accounts.length > 1) {
+    elements.activeSwitcher.style.display = '';
+    accounts.forEach((account) => {
+      const option = document.createElement('option');
+      option.value = account.accountId;
+      option.textContent = account.userAddress;
+      option.selected = account.active;
+      elements.activeAccount.appendChild(option);
+    });
+  } else {
+    elements.activeSwitcher.style.display = 'none';
+  }
+
+  // Accounts list
+  elements.accounts.textContent = '';
 
   if (accounts.length === 0) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = 'No accounts';
-    elements.activeAccount.appendChild(option);
-    elements.accounts.innerHTML = '';
-    elements.accountsPanel.classList.add('hidden');
-    elements.accountsEmpty.hidden = false;
+    elements.accountsEmpty.style.display = '';
     document.body.classList.add('loaded');
     document.body.classList.remove('loading');
     return;
   }
 
-  elements.accountsPanel.classList.remove('hidden');
-  elements.accountsEmpty.hidden = true;
-  elements.accounts.innerHTML = '';
+  elements.accountsEmpty.style.display = 'none';
 
   accounts.forEach((account) => {
-    const option = document.createElement('option');
-    option.value = account.accountId;
-    option.textContent = account.userAddress;
-    option.selected = account.active;
-    elements.activeAccount.appendChild(option);
+    const li = document.createElement('li');
+    li.className = 'account-card' + (account.active ? ' active' : '');
 
-    const item = document.createElement('li');
-    item.className = `account-card${account.active ? ' active' : ''}`;
-    item.innerHTML = `
-      <div class="account-top">
-        <div>
-          <h3 class="account-name">${account.userAddress}</h3>
-          <div class="account-meta">
-            <div><code>${account.href}</code></div>
-            <div>Storage API: <code>${account.storageApi}</code></div>
-          </div>
-        </div>
-        <span class="pill${account.active ? ' active' : ''}">${account.active ? 'Active' : 'Stored'}</span>
-      </div>
-      <div class="account-actions actions">
-        <button data-remove="${account.accountId}" class="ghost">Remove</button>
-      </div>
-    `;
-    elements.accounts.appendChild(item);
+    const avatar = document.createElement('div');
+    avatar.className = 'account-avatar';
+    avatar.textContent = getInitial(account.userAddress);
+
+    const info = document.createElement('div');
+    info.className = 'account-info';
+
+    const address = document.createElement('div');
+    address.className = 'account-address';
+    address.textContent = account.userAddress;
+
+    const server = document.createElement('div');
+    server.className = 'account-server';
+    server.textContent = getServerHost(account.href);
+
+    info.appendChild(address);
+    info.appendChild(server);
+
+    const actions = document.createElement('div');
+    actions.className = 'account-actions';
+
+    if (account.active) {
+      const badge = document.createElement('span');
+      badge.className = 'badge badge-active';
+      badge.textContent = 'Active';
+      badge.style.marginRight = '4px';
+      actions.appendChild(badge);
+    }
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn btn-danger';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', async () => {
+      setBusy(true);
+      try {
+        const payload = await sendPopupMessage({
+          action: 'removeAccount',
+          accountId: account.accountId,
+        });
+        renderAccounts(payload);
+        showToast('success', 'Account removed');
+      } catch (error) {
+        showToast('error', error instanceof Error ? error.message : String(error));
+      } finally {
+        setBusy(false);
+      }
+    });
+    actions.appendChild(removeBtn);
+
+    li.appendChild(avatar);
+    li.appendChild(info);
+    li.appendChild(actions);
+    elements.accounts.appendChild(li);
   });
 
-  attachRemoveHandlers();
   document.body.classList.add('loaded');
   document.body.classList.remove('loading');
 }
 
-async function refreshAccounts({ warm = false } = {}) {
-  if (warm) {
-    setStatus('cache', 'Restoring stored identities', 'Reading the extension cache so the popup can render immediately.');
-  }
-
+async function refreshAccounts() {
   const payload = await readStoredState();
   renderAccounts(payload);
-
-  if (payload.accounts.length === 0) {
-    setStatus('ready', 'No authenticated accounts yet', 'Add a remoteStorage identity above and the extension will keep it ready for apps.');
-  } else {
-    const activeAccount = payload.accounts.find((account) => account.active);
-    setStatus(
-      'ready',
-      'Cached account state is ready',
-      activeAccount
-        ? `Using ${activeAccount.userAddress} as the active extension identity.`
-        : 'Accounts are stored, but no active identity is selected.',
-      payload,
-    );
-  }
 }
+
+// ── Event listeners ──
 
 elements.addAccount.addEventListener('click', async () => {
   const userAddress = elements.userAddress.value.trim();
   if (!userAddress) {
-    setStatus('attention', 'User address needed', 'Enter a remoteStorage address like user@example.com to begin extension-owned authentication.');
+    showToast('error', 'Enter a remoteStorage address (e.g. user@example.com)');
+    elements.userAddress.focus();
     return;
   }
 
-  setBusy(true, 'Authenticating');
-  setStatus('auth', 'Launching authentication flow', `Opening secure browser auth for ${userAddress}.`, {
-    userAddress,
-    phase: 'discover-and-authenticate',
-  });
+  hideToast();
+  setBusy(true);
 
   try {
     const payload = await sendPopupMessage({
@@ -213,18 +215,23 @@ elements.addAccount.addEventListener('click', async () => {
     });
     elements.userAddress.value = '';
     renderAccounts(payload);
-    setStatus('ready', 'Account authenticated', `${userAddress} is now stored inside the extension and ready for brokered app connections.`, payload);
+    showToast('success', `Added ${userAddress}`);
   } catch (error) {
-    setStatus('error', 'Authentication failed', error instanceof Error ? error.message : String(error));
+    showToast('error', error instanceof Error ? error.message : String(error));
   } finally {
     setBusy(false);
   }
 });
 
+elements.userAddress.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    elements.addAccount.click();
+  }
+});
+
 elements.setActive.addEventListener('click', async () => {
   const accountId = elements.activeAccount.value || null;
-  setBusy(true, 'Switching');
-  setStatus('mutation', 'Switching active account', 'Updating which stored identity will be offered to apps by default.');
+  setBusy(true);
 
   try {
     const payload = await sendPopupMessage({
@@ -232,38 +239,36 @@ elements.setActive.addEventListener('click', async () => {
       accountId,
     });
     renderAccounts(payload);
-    const activeAccount = payload.accounts.find((account) => account.active);
-    setStatus(
-      'ready',
-      activeAccount ? 'Active account updated' : 'No active account selected',
-      activeAccount
-        ? `${activeAccount.userAddress} will now be offered first to compatible apps.`
-        : 'Compatible apps will need to specify a matching account until you choose a default again.',
-      payload,
-    );
+    showToast('success', 'Active account updated');
   } catch (error) {
-    setStatus('error', 'Could not switch active account', error instanceof Error ? error.message : String(error));
+    showToast('error', error instanceof Error ? error.message : String(error));
   } finally {
     setBusy(false);
   }
 });
 
-refreshAccounts({ warm: true }).catch((error) => {
+function openOptionsPage() {
+  chrome.runtime.openOptionsPage();
+}
+
+elements.openOptions.addEventListener('click', openOptionsPage);
+elements.openSettings.addEventListener('click', (e) => {
+  e.preventDefault();
+  openOptionsPage();
+});
+
+// ── Init ──
+
+refreshAccounts().catch((error) => {
   document.body.classList.add('loaded');
   document.body.classList.remove('loading');
-  setStatus('error', 'Could not restore cached state', error instanceof Error ? error.message : String(error));
+  showToast('error', error instanceof Error ? error.message : String(error));
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== 'local') {
-    return;
-  }
-
-  if (!changes[STORAGE_KEYS.accounts] && !changes[STORAGE_KEYS.activeAccountId]) {
-    return;
-  }
-
+  if (areaName !== 'local') return;
+  if (!changes[STORAGE_KEYS.accounts] && !changes[STORAGE_KEYS.activeAccountId]) return;
   refreshAccounts().catch((error) => {
-    setStatus('error', 'Cache refresh failed', error instanceof Error ? error.message : String(error));
+    showToast('error', error instanceof Error ? error.message : String(error));
   });
 });
