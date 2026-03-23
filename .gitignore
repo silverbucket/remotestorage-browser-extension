@@ -1,4 +1,5 @@
 node_modules
 .DS_Store
+.rs-build
 packages/demo-app/vendor/remotestorage.js
 packages/demo-app/vendor/remotestorage.js.map

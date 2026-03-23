@@ -5,6 +5,7 @@
   "scripts": {
     "generate:icons": "node scripts/generate-icons.mjs",
     "sync:bundle": "node scripts/sync-rs-bundle.mjs",
-    "serve:demo": "node scripts/serve-demo.mjs"
+    "serve:demo": "node scripts/serve-demo.mjs",
+    "demo": "bash scripts/build-and-serve.sh"
   }
 }
