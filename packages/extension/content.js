@@ -8,7 +8,7 @@ window.addEventListener('message', async (event) => {
   if (event.source !== window || !event.data) {
     return;
   }
-  if (event.data.direction !== 'page-to-extension') {
+  if (event.data.type !== 'remotestorage-bridge' || event.data.direction !== 'page-to-extension') {
     return;
   }
 
@@ -17,25 +17,27 @@ window.addEventListener('message', async (event) => {
       type: 'rs-extension-bridge',
       id: event.data.id,
       method: event.data.method,
-      payload: event.data.payload
+      payload: event.data.payload,
     });
 
     window.postMessage({
+      type: 'remotestorage-bridge',
       id: event.data.id,
       direction: 'extension-to-page',
       method: event.data.method,
       payload: response?.payload,
-      error: response?.error
+      error: response?.error,
     }, window.location.origin);
   } catch (error) {
     window.postMessage({
+      type: 'remotestorage-bridge',
       id: event.data.id,
       direction: 'extension-to-page',
       method: event.data.method,
       error: {
         code: 'request_failed',
-        message: error instanceof Error ? error.message : String(error)
-      }
+        message: error instanceof Error ? error.message : String(error),
+      },
     }, window.location.origin);
   }
 });

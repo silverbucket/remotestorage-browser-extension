@@ -56,7 +56,7 @@
         if (event.source !== window || !event.data) {
           return;
         }
-        if (event.data.direction !== 'extension-to-page' || event.data.id !== id) {
+        if (event.data.type !== 'remotestorage-bridge' || event.data.direction !== 'extension-to-page' || event.data.id !== id) {
           return;
         }
 
@@ -74,10 +74,11 @@
 
       window.addEventListener('message', onMessage);
       window.postMessage({
+        type: 'remotestorage-bridge',
         id,
         direction: 'page-to-extension',
         method,
-        payload
+        payload,
       }, window.location.origin);
     });
   }
@@ -100,7 +101,7 @@
     return error;
   }
 
-  async function normalizeBridgeResponse(remote, method, path, response) {
+  async function normalizeBridgeResponse(method, path, response) {
     if (isErrorStatus(response.statusCode)) {
       return {
         statusCode: response.statusCode,
@@ -138,13 +139,9 @@
       if (Object.keys(normalized.body).length === 0) {
         normalized.statusCode = 404;
       } else if (isFolderDescription(normalized.body)) {
-        Object.keys(normalized.body.items).forEach((item) => {
-          remote._revisionCache[path + item] = normalized.body.items[item].ETag;
-        });
         itemsMap = normalized.body.items;
       } else {
         Object.keys(normalized.body).forEach((key) => {
-          remote._revisionCache[path + key] = normalized.body[key];
           itemsMap[key] = { ETag: normalized.body[key] };
         });
       }
@@ -168,7 +165,6 @@
     remote[REMOTE_FLAG] = true;
     remote.supportsRevs = true;
     remote.token = undefined;
-    remote._revisionCache = remote._revisionCache || {};
 
     remote.disconnect = async function disconnectFromExtension() {
       if (this.sessionId) {
@@ -194,7 +190,7 @@
           headers,
           body
         });
-        const normalized = await normalizeBridgeResponse(this, method, path, response);
+        const normalized = await normalizeBridgeResponse(method, path, response);
 
         if (!this.online) {
           this.online = true;
@@ -355,6 +351,12 @@
       this._emit('connecting');
       this._emit('authing');
 
+      // Fallback behavior is intentionally asymmetric for security:
+      // - With userAddress: extension failure falls back to app's own OAuth flow,
+      //   because the user explicitly chose an account so downgrade is acceptable.
+      // - Without userAddress: extension failure is a hard error (no silent
+      //   downgrade), because the app relies entirely on the extension and
+      //   falling back could leak credentials to an unexpected auth flow.
       connectViaExtension(this, requestedUserAddress || undefined).catch((error) => {
         if (requestedUserAddress && error?.code === 'not_authenticated') {
           originalConnect.call(this, requestedUserAddress, token);
