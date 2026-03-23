@@ -22,8 +22,9 @@ function scopeSetIncludes(existing, requested) {
   return requestedSet.every(scope => existingSet.has(scope));
 }
 
-// Used only for the initial account validation when adding an account.
-// App connections use per-app scoped tokens via acquireScopedToken().
+// Returns the full-access scope string for the given RS storage API version.
+// Used when authenticating accounts so the extension holds a full token;
+// per-app scope enforcement is done in-process via checkPathPermission().
 function storageScopeForFullAccess(storageApi) {
   if (storageApi === '2012.04') {
     return ':rw';
@@ -234,17 +235,7 @@ async function discoverAccount(userAddress) {
   };
 }
 
-async function acquireScopedToken(account, requestedScopes) {
-  const normalizedScopes = normalizeScopeSet(requestedScopes);
-  const cacheKey = normalizedScopes || '*:rw';
-
-  // Check for a cached scoped token
-  const scopedTokens = account.scopedTokens || {};
-  if (scopedTokens[cacheKey]) {
-    return scopedTokens[cacheKey];
-  }
-
-  // No cached token for these scopes — run OAuth with the requested scopes
+async function authenticateAccount(account) {
   if (!account.authURL) {
     return { token: null, tokenType: null };
   }
@@ -255,7 +246,7 @@ async function acquireScopedToken(account, requestedScopes) {
   authUrl.searchParams.set('client_id', clientId);
   authUrl.searchParams.set('redirect_uri', redirectUri);
   authUrl.searchParams.set('response_type', 'token');
-  authUrl.searchParams.set('scope', normalizedScopes || storageScopeForFullAccess(account.storageApi));
+  authUrl.searchParams.set('scope', storageScopeForFullAccess(account.storageApi));
   authUrl.searchParams.set('state', account.accountId);
 
   const responseUrl = await chrome.identity.launchWebAuthFlow({
@@ -264,7 +255,7 @@ async function acquireScopedToken(account, requestedScopes) {
   });
 
   if (!responseUrl) {
-    throw new Error('Scoped token authentication did not complete.');
+    throw new Error('Authentication did not complete.');
   }
 
   const params = new URL(responseUrl).hash.startsWith('#')
@@ -273,43 +264,42 @@ async function acquireScopedToken(account, requestedScopes) {
 
   if (params.get('error')) {
     const errorCode = params.get('error');
-    const error = new Error(params.get('error_description') || errorCode || 'Scoped authorization failed.');
+    const error = new Error(params.get('error_description') || errorCode || 'Authorization failed.');
     error.code = errorCode;
     throw error;
   }
 
   const accessToken = params.get('access_token');
   if (!accessToken) {
-    throw new Error('Scoped token authentication did not return an access token.');
+    throw new Error('Authentication did not return an access token.');
   }
 
-  const tokenEntry = {
+  return {
     token: accessToken,
     tokenType: params.get('token_type') || 'Bearer',
   };
+}
 
-  // Cache the scoped token on the account in storage
-  const state = await loadState();
-  const storedAccount = state.accounts[account.accountId];
-  if (storedAccount) {
-    storedAccount.scopedTokens = storedAccount.scopedTokens || {};
-    storedAccount.scopedTokens[cacheKey] = tokenEntry;
-    await saveState(state.accounts, state.activeAccountId);
+function getAccountToken(account) {
+  if (account.token) {
+    return { token: account.token, tokenType: account.tokenType || 'Bearer' };
   }
-
-  return tokenEntry;
+  return { token: null, tokenType: null };
 }
 
 async function addAccount(userAddress) {
   const discovered = await discoverAccount(userAddress);
-  // Don't authenticate here — tokens are acquired per-app at connect time
-  // via acquireScopedToken() with the app's actual requested scopes.
-  // Discovery alone validates that the account and RS endpoint exist.
+
+  // Authenticate immediately so the user sees the RS provider's OAuth
+  // page now (during setup), not later when an app tries to connect.
+  // The token is full-access; per-app scope enforcement happens via
+  // checkPathPermission() on every request.
+  const tokenResult = await authenticateAccount(discovered);
+
   const account = {
     ...discovered,
-    token: null,
-    tokenType: null,
-    scopedTokens: {},
+    token: tokenResult.token,
+    tokenType: tokenResult.tokenType,
   };
   const state = await loadState();
   const accounts = {
@@ -460,7 +450,12 @@ async function resolveAccountForConnect(payload) {
 
 async function createSession(payload, tabId) {
   const { account } = await resolveAccountForConnect(payload);
-  const scopedToken = await acquireScopedToken(account, payload.requestedScopes);
+  const tokenEntry = getAccountToken(account);
+
+  if (!tokenEntry.token) {
+    throw new Error('Account is not authenticated. Remove and re-add it in the extension popup.');
+  }
+
   const sessionId = makeSessionId();
 
   sessions.set(sessionId, {
@@ -470,8 +465,8 @@ async function createSession(payload, tabId) {
     origin: payload.origin,
     storageApi: account.storageApi,
     tabId,
-    token: scopedToken.token,
-    tokenType: scopedToken.tokenType || 'Bearer',
+    token: tokenEntry.token,
+    tokenType: tokenEntry.tokenType,
     userAddress: account.userAddress,
   });
 
