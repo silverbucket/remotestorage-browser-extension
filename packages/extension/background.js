@@ -234,56 +234,6 @@ async function discoverAccount(userAddress) {
   };
 }
 
-async function authenticateAccount(discovered) {
-  if (!discovered.authURL) {
-    return {
-      ...discovered,
-      token: null,
-      tokenType: null,
-    };
-  }
-
-  const redirectUri = chrome.identity.getRedirectURL('rs-extension');
-  const clientId = new URL(redirectUri).origin;
-  const authUrl = new URL(discovered.authURL);
-  authUrl.searchParams.set('client_id', clientId);
-  authUrl.searchParams.set('redirect_uri', redirectUri);
-  authUrl.searchParams.set('response_type', 'token');
-  authUrl.searchParams.set('scope', storageScopeForFullAccess(discovered.storageApi));
-  authUrl.searchParams.set('state', discovered.accountId);
-
-  const responseUrl = await chrome.identity.launchWebAuthFlow({
-    interactive: true,
-    url: authUrl.href,
-  });
-
-  if (!responseUrl) {
-    throw new Error('Extension authentication did not complete.');
-  }
-
-  const params = new URL(responseUrl).hash.startsWith('#')
-    ? new URLSearchParams(new URL(responseUrl).hash.substring(1))
-    : new URLSearchParams(new URL(responseUrl).search);
-
-  if (params.get('error')) {
-    const errorCode = params.get('error');
-    const error = new Error(params.get('error_description') || errorCode || 'Authorization failed.');
-    error.code = errorCode;
-    throw error;
-  }
-
-  const accessToken = params.get('access_token');
-  if (!accessToken) {
-    throw new Error('Extension authentication did not return an access token.');
-  }
-
-  return {
-    ...discovered,
-    token: accessToken,
-    tokenType: params.get('token_type') || 'Bearer',
-  };
-}
-
 async function acquireScopedToken(account, requestedScopes) {
   const normalizedScopes = normalizeScopeSet(requestedScopes);
   const cacheKey = normalizedScopes || '*:rw';
@@ -352,13 +302,21 @@ async function acquireScopedToken(account, requestedScopes) {
 
 async function addAccount(userAddress) {
   const discovered = await discoverAccount(userAddress);
-  const authenticated = await authenticateAccount(discovered);
+  // Don't authenticate here — tokens are acquired per-app at connect time
+  // via acquireScopedToken() with the app's actual requested scopes.
+  // Discovery alone validates that the account and RS endpoint exist.
+  const account = {
+    ...discovered,
+    token: null,
+    tokenType: null,
+    scopedTokens: {},
+  };
   const state = await loadState();
   const accounts = {
     ...state.accounts,
-    [authenticated.accountId]: authenticated,
+    [account.accountId]: account,
   };
-  const activeAccountId = state.activeAccountId || authenticated.accountId;
+  const activeAccountId = state.activeAccountId || account.accountId;
   await saveState(accounts, activeAccountId);
   return {
     accounts: serializeAccounts(accounts, activeAccountId),
