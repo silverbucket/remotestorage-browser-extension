@@ -641,14 +641,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'connect': {
         const payload = message.payload || {};
 
-        if (!payload.origin || !payload.requestedScopes) {
+        if (!payload.origin) {
           sendResponse({
             error: {
               code: 'invalid_request',
-              message: 'Invalid connect payload.'
+              message: 'Invalid connect payload: missing origin.'
             }
           });
           return;
+        }
+
+        // Default empty scopes to *:rw — apps that don't specify scopes
+        // (or use older RS library versions) get full access after consent.
+        if (!payload.requestedScopes) {
+          payload.requestedScopes = '*:rw';
         }
 
         if (payload.origin !== trustedOrigin) {

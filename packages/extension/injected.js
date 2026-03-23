@@ -452,6 +452,41 @@
     }
   };
 
+  // Bridge: translate CustomEvent protocol (used by remoteStorage.js library)
+  // into postMessage protocol (used by the extension's content script).
+  // CustomEvents can't cross Chrome's isolated world boundary, but postMessage
+  // can. injected.js runs in the MAIN world alongside the library, so it can
+  // intercept CustomEvents and relay them through postMessage.
+  const BRIDGE_EVENT = 'remotestorage-bridge';
+  document.addEventListener(BRIDGE_EVENT, function onLibraryBridgeEvent(event) {
+    const detail = event.detail;
+    if (!detail || detail.direction !== 'page-to-extension' || !detail.id) {
+      return;
+    }
+
+    // Forward to content script via postMessage
+    callExtension(detail.method, detail.payload).then(function(payload) {
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENT, {
+        detail: {
+          id: detail.id,
+          direction: 'extension-to-page',
+          payload: payload,
+        }
+      }));
+    }).catch(function(error) {
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENT, {
+        detail: {
+          id: detail.id,
+          direction: 'extension-to-page',
+          error: {
+            code: error && error.code || 'request_failed',
+            message: error instanceof Error ? error.message : String(error),
+          },
+        }
+      }));
+    });
+  });
+
   watchForRemoteStorage();
   document.addEventListener('DOMContentLoaded', maybePopulateUserAddressInputs, { once: true });
   const observer = new MutationObserver(() => {
