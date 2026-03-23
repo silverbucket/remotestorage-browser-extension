@@ -370,19 +370,40 @@ async function setOriginDecision(origin, decision) {
   await chrome.storage.local.set({ [STORAGE_KEYS.allowedOrigins]: allowlist });
 }
 
-function isOriginApproved(allowlist, origin, requestedScopes) {
+function isOriginDenied(allowlist, origin) {
+  const entry = allowlist[origin];
+  return entry && entry.approved === false;
+}
+
+function isOriginApproved(allowlist, origin, requestedScopes, requestedUserAddress) {
   const entry = allowlist[origin];
   if (!entry || !entry.approved) {
     return false;
   }
+  // If the stored decision is bound to a specific userAddress, ensure it matches
+  if (typeof entry.userAddress === 'string' && entry.userAddress) {
+    if (typeof requestedUserAddress !== 'string' || !requestedUserAddress) {
+      return false;
+    }
+    if (entry.userAddress !== requestedUserAddress) {
+      return false;
+    }
+  }
   return scopeSetIncludes(entry.scopes, requestedScopes);
 }
 
+function consentDeduplicationKey(origin, requestedScopes, userAddress) {
+  return [origin, normalizeScopeSet(requestedScopes), userAddress || ''].join('\0');
+}
+
 function requestUserConsent(consentId, details) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const consentUrl = chrome.runtime.getURL(
       `consent.html?consentId=${encodeURIComponent(consentId)}`
     );
+
+    // Persist consent details so the consent UI can recover if the SW restarts
+    chrome.storage.session.set({ ['pendingConsent:' + consentId]: details }).catch(() => {});
 
     chrome.windows.create({
       url: consentUrl,
@@ -391,6 +412,12 @@ function requestUserConsent(consentId, details) {
       height: 480,
       focused: true,
     }, (win) => {
+      if (chrome.runtime.lastError || !win) {
+        chrome.storage.session.remove('pendingConsent:' + consentId).catch(() => {});
+        resolve({ approved: false, remember: false });
+        return;
+      }
+
       pendingConsents.set(consentId, {
         ...details,
         resolve,
@@ -526,7 +553,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'rs-extension-consent') {
     (async () => {
       if (message.action === 'getConsentRequest') {
-        const pending = pendingConsents.get(message.consentId);
+        let pending = pendingConsents.get(message.consentId);
+        // Fall back to persisted consent details if SW restarted
+        if (!pending) {
+          const stored = await chrome.storage.session.get('pendingConsent:' + message.consentId);
+          pending = stored['pendingConsent:' + message.consentId];
+        }
         if (!pending) {
           sendResponse({ error: { code: 'not_found', message: 'Unknown consent request.' } });
           return;
@@ -544,10 +576,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.action === 'consentResponse') {
         const pending = pendingConsents.get(message.consentId);
         if (!pending) {
-          sendResponse({ error: { code: 'not_found', message: 'Unknown consent request.' } });
+          // If SW restarted, the in-memory map is gone — treat as auto-deny
+          chrome.storage.session.remove('pendingConsent:' + message.consentId).catch(() => {});
+          sendResponse({ error: { code: 'not_found', message: 'Consent request expired (service worker restarted). Please try again.' } });
           return;
         }
         pendingConsents.delete(message.consentId);
+        chrome.storage.session.remove('pendingConsent:' + message.consentId).catch(() => {});
         pending.resolve({
           approved: Boolean(message.approved),
           remember: Boolean(message.remember),
@@ -582,6 +617,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (!trustedOrigin) {
+    sendResponse({
+      error: { code: 'invalid_context', message: 'Bridge messages must have a valid origin.' }
+    });
+    return true;
+  }
+
   (async () => {
     switch (message.method) {
       case 'ping': {
@@ -599,17 +641,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'connect': {
         const payload = message.payload || {};
 
-        if (!payload.origin || !payload.requestedScopes) {
+        if (!payload.origin) {
           sendResponse({
             error: {
               code: 'invalid_request',
-              message: 'Invalid connect payload.'
+              message: 'Invalid connect payload: missing origin.'
             }
           });
           return;
         }
 
-        if (trustedOrigin && payload.origin !== trustedOrigin) {
+        // Default empty scopes to *:rw — apps that don't specify scopes
+        // (or use older RS library versions) get full access after consent.
+        if (!payload.requestedScopes) {
+          payload.requestedScopes = '*:rw';
+        }
+
+        if (payload.origin !== trustedOrigin) {
           sendResponse({
             error: {
               code: 'origin_mismatch',
@@ -620,12 +668,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const allowlist = await getOriginAllowlist();
-        if (!isOriginApproved(allowlist, trustedOrigin, payload.requestedScopes)) {
-          const consentId = crypto.randomUUID();
 
-          // Deduplicate: if consent is already pending for same origin, wait for it
+        // Respect remembered denials
+        if (isOriginDenied(allowlist, trustedOrigin)) {
+          sendResponse({
+            error: { code: 'denied', message: 'Access was previously denied for this origin.' }
+          });
+          return;
+        }
+
+        if (!isOriginApproved(allowlist, trustedOrigin, payload.requestedScopes, payload.userAddress)) {
+          const consentId = crypto.randomUUID();
+          const dedupKey = consentDeduplicationKey(trustedOrigin, payload.requestedScopes, payload.userAddress);
+
+          // Deduplicate: only reuse pending consent if origin + scopes + userAddress match
           const existingConsent = Array.from(pendingConsents.values()).find(
-            (p) => p.origin === trustedOrigin
+            (p) => consentDeduplicationKey(p.origin, p.requestedScopes, p.userAddress) === dedupKey
           );
           let consentResult;
           if (existingConsent) {
@@ -645,6 +703,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
 
           if (!consentResult.approved) {
+            // Persist denial if user checked "remember"
+            if (consentResult.remember) {
+              await setOriginDecision(trustedOrigin, {
+                approved: false,
+                scopes: normalizeScopeSet(payload.requestedScopes),
+                deniedAt: Date.now(),
+                userAddress: payload.userAddress,
+              });
+            }
             sendResponse({
               error: { code: 'denied', message: 'User denied access.' }
             });
@@ -680,7 +747,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        if (trustedOrigin && session.origin !== trustedOrigin) {
+        if (session.origin !== trustedOrigin) {
           sendResponse({ payload: { statusCode: 403 } });
           return;
         }

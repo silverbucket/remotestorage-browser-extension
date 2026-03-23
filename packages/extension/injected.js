@@ -2,6 +2,8 @@
   const SETTINGS_KEY = 'remotestorage:wireclient';
   const SHIM_FLAG = '__remoteStorageExtensionShimInstalled';
   const REMOTE_FLAG = '__remoteStorageExtensionRemotePatched';
+  const LOG_PREFIX = '[rs-extension]';
+  const CALL_TIMEOUT_MS = 5000;
   const USER_ADDRESS_INPUT_SELECTOR = [
     'input[type="email"]',
     'input[name*="user" i]',
@@ -48,9 +50,10 @@
     }) || null;
   }
 
-  function callExtension(method, payload) {
+  function callExtension(method, payload, timeoutMs) {
     return new Promise((resolve, reject) => {
       const id = makeId();
+      let settled = false;
 
       function onMessage(event) {
         if (event.source !== window || !event.data) {
@@ -60,15 +63,19 @@
           return;
         }
 
+        if (settled) return;
+        settled = true;
         window.removeEventListener('message', onMessage);
 
         if (event.data.error) {
+          console.warn(LOG_PREFIX, method, 'error:', event.data.error.code, event.data.error.message);
           const error = new Error(event.data.error.message);
           error.code = event.data.error.code;
           reject(error);
           return;
         }
 
+        console.debug(LOG_PREFIX, method, 'ok');
         resolve(event.data.payload);
       }
 
@@ -80,6 +87,16 @@
         method,
         payload,
       }, window.location.origin);
+
+      setTimeout(function() {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('message', onMessage);
+        console.warn(LOG_PREFIX, method, 'timed out after', (timeoutMs || CALL_TIMEOUT_MS) + 'ms');
+        var error = new Error('Extension bridge timed out.');
+        error.code = 'timeout';
+        reject(error);
+      }, timeoutMs || CALL_TIMEOUT_MS);
     });
   }
 
@@ -274,7 +291,10 @@
   }
 
   async function connectViaExtension(rs, userAddress) {
+    console.log(LOG_PREFIX, 'connecting via extension, userAddress:', userAddress || '(active account)');
     const bridgeState = await window.remoteStorageExtension.ping();
+    console.log(LOG_PREFIX, 'ping result:', bridgeState?.accounts?.length, 'accounts, active:', bridgeState?.activeAccountId);
+
     const activeAccount = userAddress
       ? (Array.isArray(bridgeState.accounts) ? bridgeState.accounts.find((account) => {
         return String(account.userAddress).toLowerCase() === String(userAddress).toLowerCase();
@@ -282,11 +302,13 @@
       : getActiveAccount(bridgeState);
 
     if (!activeAccount) {
+      console.warn(LOG_PREFIX, 'no matching account in extension for:', userAddress);
       const noAccountError = new Error('No matching extension account is authenticated.');
       noAccountError.code = 'not_authenticated';
       throw noAccountError;
     }
 
+    console.log(LOG_PREFIX, 'matched account:', activeAccount.userAddress, 'requesting connect');
     const location = window.location;
     let redirectUri = location.origin;
     if (location.pathname !== '/') {
@@ -294,6 +316,8 @@
     }
     const clientIdMatch = redirectUri.match(/^(https?:\/\/[^/]+)/);
     const scope = rs.access?.scopeParameter || '';
+    console.log(LOG_PREFIX, 'app scopes:', scope || '(none, will default to *:rw)');
+
     const response = await window.remoteStorageExtension.connect({
       backend: 'remotestorage',
       origin: location.origin,
@@ -306,6 +330,8 @@
       clientId: clientIdMatch ? clientIdMatch[0] : location.origin,
       requestedScopes: scope
     });
+
+    console.log(LOG_PREFIX, 'connected, sessionId:', response.sessionId, 'grantedScopes:', response.grantedScopes);
 
     if (typeof rs.setBackend === 'function') {
       rs.setBackend('remotestorage');
@@ -340,25 +366,25 @@
     }
 
     window[SHIM_FLAG] = true;
+    console.log(LOG_PREFIX, 'shim installed — RemoteStorage.prototype.connect patched');
 
     RemoteStorage.prototype.connect = function patchedConnect(userAddress, token) {
       if (!window.remoteStorageExtension || typeof token !== 'undefined') {
+        console.debug(LOG_PREFIX, 'bypass: token provided or extension unavailable');
         return originalConnect.apply(this, arguments);
       }
 
       const requestedUserAddress = typeof userAddress === 'string' ? userAddress.trim() : '';
+      console.log(LOG_PREFIX, 'intercepted connect(', requestedUserAddress || '(no address)', ')');
 
       this._emit('connecting');
       this._emit('authing');
 
-      // Fallback behavior is intentionally asymmetric for security:
-      // - With userAddress: extension failure falls back to app's own OAuth flow,
-      //   because the user explicitly chose an account so downgrade is acceptable.
-      // - Without userAddress: extension failure is a hard error (no silent
-      //   downgrade), because the app relies entirely on the extension and
-      //   falling back could leak credentials to an unexpected auth flow.
       connectViaExtension(this, requestedUserAddress || undefined).catch((error) => {
+        console.warn(LOG_PREFIX, 'connect failed:', error?.code, error?.message);
+
         if (requestedUserAddress && error?.code === 'not_authenticated') {
+          console.log(LOG_PREFIX, 'falling back to app OAuth (account not in extension)');
           originalConnect.call(this, requestedUserAddress, token);
           return;
         }
@@ -374,6 +400,7 @@
         }
 
         if (requestedUserAddress) {
+          console.log(LOG_PREFIX, 'falling back to app OAuth due to error:', error?.code || 'unknown');
           originalConnect.call(this, requestedUserAddress, token);
           return;
         }
@@ -412,6 +439,10 @@
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
       });
+
+      if (inputs.length > 0) {
+        console.log(LOG_PREFIX, 'pre-filled', inputs.length, 'address input(s) with', activeAccount.userAddress);
+      }
     }).catch(() => undefined);
   }
 
@@ -433,6 +464,9 @@
 
     window.setTimeout(() => {
       window.clearInterval(interval);
+      if (!window[SHIM_FLAG]) {
+        console.debug(LOG_PREFIX, 'gave up waiting for window.RemoteStorage after 15s');
+      }
     }, 15000);
   }
 
@@ -452,6 +486,42 @@
     }
   };
 
+  // Bridge: translate CustomEvent protocol (used by remoteStorage.js library)
+  // into postMessage protocol (used by the extension's content script).
+  // CustomEvents can't cross Chrome's isolated world boundary, but postMessage
+  // can. injected.js runs in the MAIN world alongside the library, so it can
+  // intercept CustomEvents and relay them through postMessage.
+  const BRIDGE_EVENT = 'remotestorage-bridge';
+  document.addEventListener(BRIDGE_EVENT, function onLibraryBridgeEvent(event) {
+    const detail = event.detail;
+    if (!detail || detail.direction !== 'page-to-extension' || !detail.id) {
+      return;
+    }
+
+    // Forward to content script via postMessage
+    callExtension(detail.method, detail.payload).then(function(payload) {
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENT, {
+        detail: {
+          id: detail.id,
+          direction: 'extension-to-page',
+          payload: payload,
+        }
+      }));
+    }).catch(function(error) {
+      document.dispatchEvent(new CustomEvent(BRIDGE_EVENT, {
+        detail: {
+          id: detail.id,
+          direction: 'extension-to-page',
+          error: {
+            code: error && error.code || 'request_failed',
+            message: error instanceof Error ? error.message : String(error),
+          },
+        }
+      }));
+    });
+  });
+
+  console.log(LOG_PREFIX, 'loaded, window.remoteStorageExtension ready');
   watchForRemoteStorage();
   document.addEventListener('DOMContentLoaded', maybePopulateUserAddressInputs, { once: true });
   const observer = new MutationObserver(() => {

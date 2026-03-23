@@ -17,16 +17,34 @@ const elements = {
 
 function humanizeScopes(scopeString) {
   const scopes = String(scopeString || '').trim();
+  if (!scopes) return 'none requested';
+  if (scopes === '*:rw') return 'full read + write';
+  if (scopes === '*:r') return 'full read-only';
+
+  return scopes.split(/\s+/).map((s) => {
+    const [name, mode] = s.split(':');
+    const modeLabel = mode === 'rw' ? 'read/write' : 'read-only';
+    return `${name} (${modeLabel})`;
+  }).join(', ');
+}
+
+function renderScopeTags(scopeString) {
+  const scopes = String(scopeString || '').trim();
   if (!scopes) {
-    return 'none requested';
+    elements.scopesValue.textContent = 'none requested';
+    return;
   }
-  if (scopes === '*:rw') {
-    return 'full read/write access';
-  }
-  if (scopes === '*:r') {
-    return 'full read-only access';
-  }
-  return scopes;
+
+  elements.scopesValue.textContent = '';
+  scopes.split(/\s+/).forEach((scope, i) => {
+    if (i > 0) {
+      elements.scopesValue.appendChild(document.createTextNode(' '));
+    }
+    const tag = document.createElement('span');
+    tag.className = 'scope-tag';
+    tag.textContent = humanizeScopes(scope);
+    elements.scopesValue.appendChild(tag);
+  });
 }
 
 function showError(message) {
@@ -47,13 +65,19 @@ async function respond(approved) {
   elements.allowBtn.disabled = true;
   elements.denyBtn.disabled = true;
 
-  await sendConsentMessage({
-    action: 'consentResponse',
-    approved,
-    remember: elements.remember.checked,
-  });
+  try {
+    await sendConsentMessage({
+      action: 'consentResponse',
+      approved,
+      remember: elements.remember.checked,
+    });
 
-  window.close();
+    window.close();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : String(error));
+    elements.allowBtn.disabled = false;
+    elements.denyBtn.disabled = false;
+  }
 }
 
 async function init() {
@@ -79,7 +103,7 @@ async function init() {
     }
 
     elements.originValue.textContent = details.origin;
-    elements.scopesValue.textContent = humanizeScopes(details.requestedScopes);
+    renderScopeTags(details.requestedScopes);
     elements.accountValue.textContent = details.userAddress || 'active account';
 
     elements.loading.hidden = true;
