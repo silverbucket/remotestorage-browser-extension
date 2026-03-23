@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>remoteStorage — Allow Access?</title>
+    <style>
+      :root {
+        --bg: #f6f0e6;
+        --panel: rgba(255, 250, 244, 0.92);
+        --panel-strong: rgba(255, 247, 238, 0.98);
+        --line: rgba(126, 90, 61, 0.16);
+        --line-strong: rgba(126, 90, 61, 0.24);
+        --text: #221b16;
+        --muted: #6d6258;
+        --accent: #ff4b03;
+        --accent-deep: #c73c00;
+        --olive: #2f6f56;
+        --olive-soft: rgba(47, 111, 86, 0.12);
+        --danger: #b33a1f;
+        --mono: "IBM Plex Mono", "Menlo", monospace;
+        --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-width: 360px;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(255, 117, 46, 0.14), transparent 34%),
+          radial-gradient(circle at 85% 0%, rgba(47, 111, 86, 0.12), transparent 28%),
+          linear-gradient(180deg, #fbf7f1, var(--bg));
+        font-family: var(--serif);
+      }
+
+      .shell {
+        padding: 20px;
+        display: grid;
+        gap: 16px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 1.2rem;
+        line-height: 1.2;
+      }
+
+      .subtitle {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 0.92rem;
+        line-height: 1.4;
+      }
+
+      .detail-card {
+        padding: 14px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+        display: grid;
+        gap: 12px;
+      }
+
+      .detail-row {
+        display: grid;
+        gap: 4px;
+      }
+
+      .detail-label {
+        font-size: 0.72rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        font-family: var(--mono);
+        color: var(--muted);
+      }
+
+      .detail-value {
+        font-size: 0.95rem;
+        font-weight: 700;
+        word-break: break-all;
+      }
+
+      .detail-value.mono {
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        font-weight: 600;
+      }
+
+      .remember-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-radius: 14px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        cursor: pointer;
+      }
+
+      .remember-row input {
+        margin: 0;
+        accent-color: var(--olive);
+      }
+
+      .remember-row span {
+        font-size: 0.88rem;
+        color: var(--text);
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+
+      button {
+        font: inherit;
+        border: none;
+        border-radius: 999px;
+        padding: 12px 16px;
+        cursor: pointer;
+        font-weight: 600;
+        transition: transform 140ms ease, box-shadow 140ms ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: wait;
+        transform: none;
+      }
+
+      #deny-btn {
+        color: var(--text);
+        background: linear-gradient(180deg, #f4ece3, #eadfce);
+        border: 1px solid var(--line-strong);
+      }
+
+      #allow-btn {
+        color: #fffaf6;
+        background: linear-gradient(180deg, var(--olive), #245e47);
+        box-shadow: 0 8px 16px rgba(36, 94, 71, 0.24);
+      }
+
+      #allow-btn:hover {
+        box-shadow: 0 10px 22px rgba(36, 94, 71, 0.3);
+      }
+
+      .loading-state {
+        text-align: center;
+        padding: 32px 0;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .error-state {
+        color: var(--danger);
+        font-size: 0.92rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div>
+        <h1>Allow remoteStorage access?</h1>
+        <p class="subtitle">A website is requesting access to your remoteStorage account through the extension.</p>
+      </div>
+
+      <div id="loading" class="loading-state">Loading request details...</div>
+
+      <div id="details" class="detail-card" hidden>
+        <div class="detail-row">
+          <span class="detail-label">Requesting origin</span>
+          <span class="detail-value" id="origin-value"></span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Requested scopes</span>
+          <span class="detail-value mono" id="scopes-value"></span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Account</span>
+          <span class="detail-value" id="account-value"></span>
+        </div>
+      </div>
+
+      <label id="remember-label" class="remember-row" hidden>
+        <input type="checkbox" id="remember" checked />
+        <span>Remember this decision</span>
+      </label>
+
+      <div id="consent-actions" class="actions" hidden>
+        <button id="deny-btn">Deny</button>
+        <button id="allow-btn">Allow</button>
+      </div>
+
+      <div id="error" class="error-state" hidden></div>
+    </div>
+
+    <script src="consent.js"></script>
+  </body>
+</html>

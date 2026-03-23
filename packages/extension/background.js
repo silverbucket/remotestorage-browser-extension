@@ -2,8 +2,10 @@ const BRIDGE_VERSION = 1;
 const STORAGE_KEYS = {
   accounts: 'accounts',
   activeAccountId: 'activeAccountId',
+  allowedOrigins: 'allowedOrigins',
 };
 const sessions = new Map();
+const pendingConsents = new Map();
 
 function normalizeScopeSet(scopeString) {
   return String(scopeString || '')
@@ -20,6 +22,10 @@ function scopeSetIncludes(existing, requested) {
   return requestedSet.every(scope => existingSet.has(scope));
 }
 
+// The extension requests full access (*:rw) when authenticating with RS servers.
+// This is by design: the extension acts as a shared broker for multiple apps.
+// Per-app scope enforcement happens in-process via checkPathPermission() on
+// every request, using the scopes the user approved in the consent UI.
 function storageScopeForFullAccess(storageApi) {
   if (storageApi === '2012.04') {
     return ':rw';
@@ -331,6 +337,58 @@ async function listAccounts() {
   };
 }
 
+async function getOriginAllowlist() {
+  const state = await chrome.storage.local.get(STORAGE_KEYS.allowedOrigins);
+  return state[STORAGE_KEYS.allowedOrigins] || {};
+}
+
+async function setOriginDecision(origin, decision) {
+  const allowlist = await getOriginAllowlist();
+  allowlist[origin] = decision;
+  await chrome.storage.local.set({ [STORAGE_KEYS.allowedOrigins]: allowlist });
+}
+
+function isOriginApproved(allowlist, origin, requestedScopes) {
+  const entry = allowlist[origin];
+  if (!entry || !entry.approved) {
+    return false;
+  }
+  return scopeSetIncludes(entry.scopes, requestedScopes);
+}
+
+function requestUserConsent(consentId, details) {
+  return new Promise((resolve) => {
+    const consentUrl = chrome.runtime.getURL(
+      `consent.html?consentId=${encodeURIComponent(consentId)}`
+    );
+
+    chrome.windows.create({
+      url: consentUrl,
+      type: 'popup',
+      width: 420,
+      height: 480,
+      focused: true,
+    }, (win) => {
+      pendingConsents.set(consentId, {
+        ...details,
+        resolve,
+        windowId: win.id,
+      });
+    });
+  });
+}
+
+function senderOrigin(sender) {
+  if (!sender?.url) {
+    return null;
+  }
+  try {
+    return new URL(sender.url).origin;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveAccountForConnect(payload) {
   const state = await loadState();
   const requestedUserAddress = payload.userAddress ? accountIdFor(payload.userAddress) : null;
@@ -351,7 +409,7 @@ async function resolveAccountForConnect(payload) {
   return { account, state };
 }
 
-async function createSession(payload) {
+async function createSession(payload, tabId) {
   const { account } = await resolveAccountForConnect(payload);
   const sessionId = makeSessionId();
 
@@ -361,6 +419,7 @@ async function createSession(payload) {
     href: account.href,
     origin: payload.origin,
     storageApi: account.storageApi,
+    tabId,
     token: account.token,
     tokenType: account.tokenType || 'Bearer',
     userAddress: account.userAddress,
@@ -406,7 +465,7 @@ async function performRemoteRequest(session, payload) {
   };
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'rs-extension-popup') {
     (async () => {
       switch (message.action) {
@@ -441,8 +500,63 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === 'rs-extension-consent') {
+    (async () => {
+      if (message.action === 'getConsentRequest') {
+        const pending = pendingConsents.get(message.consentId);
+        if (!pending) {
+          sendResponse({ error: { code: 'not_found', message: 'Unknown consent request.' } });
+          return;
+        }
+        sendResponse({
+          payload: {
+            origin: pending.origin,
+            requestedScopes: pending.requestedScopes,
+            userAddress: pending.userAddress,
+          }
+        });
+        return;
+      }
+
+      if (message.action === 'consentResponse') {
+        const pending = pendingConsents.get(message.consentId);
+        if (!pending) {
+          sendResponse({ error: { code: 'not_found', message: 'Unknown consent request.' } });
+          return;
+        }
+        pendingConsents.delete(message.consentId);
+        pending.resolve({
+          approved: Boolean(message.approved),
+          remember: Boolean(message.remember),
+        });
+        sendResponse({ payload: { ok: true } });
+        return;
+      }
+
+      sendResponse({ error: { code: 'unsupported', message: 'Unknown consent action.' } });
+    })().catch((error) => {
+      sendResponse({
+        error: {
+          code: error?.code || 'request_failed',
+          message: error instanceof Error ? error.message : String(error?.message || error),
+        }
+      });
+    });
+    return true;
+  }
+
   if (message?.type !== 'rs-extension-bridge') {
     return undefined;
+  }
+
+  const trustedOrigin = senderOrigin(sender);
+  const tabId = sender.tab?.id;
+
+  if (typeof tabId !== 'number') {
+    sendResponse({
+      error: { code: 'invalid_context', message: 'Bridge messages must originate from a tab.' }
+    });
+    return true;
   }
 
   (async () => {
@@ -465,14 +579,66 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (!payload.origin || !payload.requestedScopes) {
           sendResponse({
             error: {
-              code: 'invalid_response',
+              code: 'invalid_request',
               message: 'Invalid connect payload.'
             }
           });
           return;
         }
 
-        const session = await createSession(payload);
+        if (trustedOrigin && payload.origin !== trustedOrigin) {
+          sendResponse({
+            error: {
+              code: 'origin_mismatch',
+              message: 'Claimed origin does not match sender.',
+            }
+          });
+          return;
+        }
+
+        const allowlist = await getOriginAllowlist();
+        if (!isOriginApproved(allowlist, trustedOrigin, payload.requestedScopes)) {
+          const consentId = crypto.randomUUID();
+
+          // Deduplicate: if consent is already pending for same origin, wait for it
+          const existingConsent = Array.from(pendingConsents.values()).find(
+            (p) => p.origin === trustedOrigin
+          );
+          let consentResult;
+          if (existingConsent) {
+            consentResult = await new Promise((resolve) => {
+              const existingResolve = existingConsent.resolve;
+              existingConsent.resolve = (result) => {
+                existingResolve(result);
+                resolve(result);
+              };
+            });
+          } else {
+            consentResult = await requestUserConsent(consentId, {
+              origin: trustedOrigin,
+              requestedScopes: payload.requestedScopes,
+              userAddress: payload.userAddress,
+            });
+          }
+
+          if (!consentResult.approved) {
+            sendResponse({
+              error: { code: 'denied', message: 'User denied access.' }
+            });
+            return;
+          }
+
+          if (consentResult.remember) {
+            await setOriginDecision(trustedOrigin, {
+              approved: true,
+              scopes: normalizeScopeSet(payload.requestedScopes),
+              approvedAt: Date.now(),
+              userAddress: payload.userAddress,
+            });
+          }
+        }
+
+        const session = await createSession(payload, tabId);
         sendResponse({ payload: session });
         return;
       }
@@ -486,10 +652,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
 
+        if (session.tabId !== tabId) {
+          sendResponse({ payload: { statusCode: 403 } });
+          return;
+        }
+
+        if (trustedOrigin && session.origin !== trustedOrigin) {
+          sendResponse({ payload: { statusCode: 403 } });
+          return;
+        }
+
         if (!payload.path || !payload.method) {
           sendResponse({
             error: {
-              code: 'invalid_response',
+              code: 'invalid_request',
               message: 'Invalid request payload.'
             }
           });
@@ -507,7 +683,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           : message.payload?.sessionId;
 
         if (sessionId) {
-          sessions.delete(sessionId);
+          const session = sessions.get(sessionId);
+          if (session && session.tabId === tabId) {
+            sessions.delete(sessionId);
+          }
         }
 
         sendResponse({ payload: { ok: true } });
@@ -532,4 +711,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   });
 
   return true;
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  for (const [sessionId, session] of sessions) {
+    if (session.tabId === tabId) {
+      sessions.delete(sessionId);
+    }
+  }
+});
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  for (const [consentId, pending] of pendingConsents) {
+    if (pending.windowId === windowId) {
+      pending.resolve({ approved: false, remember: false });
+      pendingConsents.delete(consentId);
+    }
+  }
 });
