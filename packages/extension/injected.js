@@ -52,33 +52,34 @@
     return new Promise((resolve, reject) => {
       const id = makeId();
 
-      function onResponse(event) {
-        const detail = event.detail;
-        if (!detail || detail.direction !== 'extension-to-page' || detail.id !== id) {
+      function onMessage(event) {
+        if (event.source !== window || !event.data) {
+          return;
+        }
+        if (event.data.type !== 'remotestorage-bridge' || event.data.direction !== 'extension-to-page' || event.data.id !== id) {
           return;
         }
 
-        document.removeEventListener('remotestorage-bridge', onResponse);
+        window.removeEventListener('message', onMessage);
 
-        if (detail.error) {
-          const error = new Error(detail.error.message);
-          error.code = detail.error.code;
+        if (event.data.error) {
+          const error = new Error(event.data.error.message);
+          error.code = event.data.error.code;
           reject(error);
           return;
         }
 
-        resolve(detail.payload);
+        resolve(event.data.payload);
       }
 
-      document.addEventListener('remotestorage-bridge', onResponse);
-      document.dispatchEvent(new CustomEvent('remotestorage-bridge', {
-        detail: {
-          id,
-          direction: 'page-to-extension',
-          method,
-          payload,
-        },
-      }));
+      window.addEventListener('message', onMessage);
+      window.postMessage({
+        type: 'remotestorage-bridge',
+        id,
+        direction: 'page-to-extension',
+        method,
+        payload,
+      }, window.location.origin);
     });
   }
 
