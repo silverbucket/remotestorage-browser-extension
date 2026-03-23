@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>remoteStorage Extension Demo</title>
+    <style>
+      :root {
+        color: #1f2430;
+        background:
+          radial-gradient(circle at top left, #f6e7d8, transparent 35%),
+          linear-gradient(180deg, #fcfaf7, #f2ece4);
+        font-family: Georgia, serif;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+      .shell {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 44px 20px 64px;
+      }
+      .card {
+        background: rgba(255, 251, 245, 0.94);
+        border: 1px solid #d9c9b4;
+        border-radius: 18px;
+        box-shadow: 0 18px 36px rgba(92, 61, 46, 0.08);
+        padding: 22px;
+      }
+      h1 {
+        font-size: 2.3rem;
+        margin: 0 0 10px;
+      }
+      p {
+        line-height: 1.55;
+      }
+      .grid {
+        display: grid;
+        gap: 18px;
+        margin-top: 24px;
+      }
+      label {
+        display: block;
+        font-weight: 700;
+        margin-bottom: 6px;
+      }
+      input, textarea, button {
+        font: inherit;
+      }
+      input, textarea {
+        width: 100%;
+        box-sizing: border-box;
+        border-radius: 10px;
+        border: 1px solid #bca58b;
+        padding: 10px 12px;
+        background: #fffdf9;
+      }
+      textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+      .buttons {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      button {
+        border: none;
+        border-radius: 999px;
+        padding: 10px 16px;
+        background: #9055a2;
+        color: #fff;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #5c3d2e;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: 160px 1fr;
+        gap: 8px 12px;
+        margin: 0;
+      }
+      dt {
+        font-weight: 700;
+      }
+      dd {
+        margin: 0;
+      }
+      pre {
+        margin: 0;
+        border-radius: 12px;
+        padding: 14px;
+        background: #f7f1e8;
+        border: 1px solid #d8c7b3;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+    <script src="./vendor/remotestorage.js"></script>
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="card">
+        <h1>remoteStorage Extension Demo</h1>
+        <p>This demo uses the patched <code>RemoteStorage</code> client normally. If the extension is installed, the library should prefer it automatically during <code>connect()</code>.</p>
+
+        <div class="grid">
+          <div>
+            <label for="user-address">User Address</label>
+            <input id="user-address" placeholder="Leave blank to use the extension’s active account" />
+          </div>
+
+          <div>
+            <label for="scope-input">Scope</label>
+            <input id="scope-input" value="notes:rw" />
+          </div>
+
+          <div>
+            <label for="note-body">Note Body</label>
+            <textarea id="note-body">hello from the extension demo</textarea>
+          </div>
+
+          <div class="buttons">
+            <button id="check-extension" class="secondary">Check Extension</button>
+            <button id="connect-button">Connect</button>
+            <button id="put-button">PUT</button>
+            <button id="get-button">GET</button>
+            <button id="delete-button">DELETE</button>
+          </div>
+
+          <div>
+            <dl>
+              <dt>Extension</dt>
+              <dd id="extension-status">unknown</dd>
+              <dt>Connection</dt>
+              <dd id="connection-status">idle</dd>
+              <dt>Backend</dt>
+              <dd id="backend-status">unknown</dd>
+              <dt>Remote Type</dt>
+              <dd id="remote-status">unknown</dd>
+            </dl>
+          </div>
+
+          <div>
+            <label>Output</label>
+            <pre id="output">Waiting for action...</pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+  </html>

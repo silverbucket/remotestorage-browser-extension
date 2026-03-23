@@ -1,0 +1,10 @@
+{
+  "name": "remotestorage-browser-extension",
+  "description": "Prototype browser extension broker for remoteStorage apps.",
+  "private": true,
+  "scripts": {
+    "generate:icons": "node scripts/generate-icons.mjs",
+    "sync:bundle": "node scripts/sync-rs-bundle.mjs",
+    "serve:demo": "node scripts/serve-demo.mjs"
+  }
+}
