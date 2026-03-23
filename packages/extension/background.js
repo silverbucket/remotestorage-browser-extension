@@ -22,10 +22,8 @@ function scopeSetIncludes(existing, requested) {
   return requestedSet.every(scope => existingSet.has(scope));
 }
 
-// The extension requests full access (*:rw) when authenticating with RS servers.
-// This is by design: the extension acts as a shared broker for multiple apps.
-// Per-app scope enforcement happens in-process via checkPathPermission() on
-// every request, using the scopes the user approved in the consent UI.
+// Used only for the initial account validation when adding an account.
+// App connections use per-app scoped tokens via acquireScopedToken().
 function storageScopeForFullAccess(storageApi) {
   if (storageApi === '2012.04') {
     return ':rw';
@@ -286,6 +284,72 @@ async function authenticateAccount(discovered) {
   };
 }
 
+async function acquireScopedToken(account, requestedScopes) {
+  const normalizedScopes = normalizeScopeSet(requestedScopes);
+  const cacheKey = normalizedScopes || '*:rw';
+
+  // Check for a cached scoped token
+  const scopedTokens = account.scopedTokens || {};
+  if (scopedTokens[cacheKey]) {
+    return scopedTokens[cacheKey];
+  }
+
+  // No cached token for these scopes — run OAuth with the requested scopes
+  if (!account.authURL) {
+    return { token: null, tokenType: null };
+  }
+
+  const redirectUri = chrome.identity.getRedirectURL('rs-extension');
+  const clientId = new URL(redirectUri).origin;
+  const authUrl = new URL(account.authURL);
+  authUrl.searchParams.set('client_id', clientId);
+  authUrl.searchParams.set('redirect_uri', redirectUri);
+  authUrl.searchParams.set('response_type', 'token');
+  authUrl.searchParams.set('scope', normalizedScopes || storageScopeForFullAccess(account.storageApi));
+  authUrl.searchParams.set('state', account.accountId);
+
+  const responseUrl = await chrome.identity.launchWebAuthFlow({
+    interactive: true,
+    url: authUrl.href,
+  });
+
+  if (!responseUrl) {
+    throw new Error('Scoped token authentication did not complete.');
+  }
+
+  const params = new URL(responseUrl).hash.startsWith('#')
+    ? new URLSearchParams(new URL(responseUrl).hash.substring(1))
+    : new URLSearchParams(new URL(responseUrl).search);
+
+  if (params.get('error')) {
+    const errorCode = params.get('error');
+    const error = new Error(params.get('error_description') || errorCode || 'Scoped authorization failed.');
+    error.code = errorCode;
+    throw error;
+  }
+
+  const accessToken = params.get('access_token');
+  if (!accessToken) {
+    throw new Error('Scoped token authentication did not return an access token.');
+  }
+
+  const tokenEntry = {
+    token: accessToken,
+    tokenType: params.get('token_type') || 'Bearer',
+  };
+
+  // Cache the scoped token on the account in storage
+  const state = await loadState();
+  const storedAccount = state.accounts[account.accountId];
+  if (storedAccount) {
+    storedAccount.scopedTokens = storedAccount.scopedTokens || {};
+    storedAccount.scopedTokens[cacheKey] = tokenEntry;
+    await saveState(state.accounts, state.activeAccountId);
+  }
+
+  return tokenEntry;
+}
+
 async function addAccount(userAddress) {
   const discovered = await discoverAccount(userAddress);
   const authenticated = await authenticateAccount(discovered);
@@ -411,6 +475,7 @@ async function resolveAccountForConnect(payload) {
 
 async function createSession(payload, tabId) {
   const { account } = await resolveAccountForConnect(payload);
+  const scopedToken = await acquireScopedToken(account, payload.requestedScopes);
   const sessionId = makeSessionId();
 
   sessions.set(sessionId, {
@@ -420,8 +485,8 @@ async function createSession(payload, tabId) {
     origin: payload.origin,
     storageApi: account.storageApi,
     tabId,
-    token: account.token,
-    tokenType: account.tokenType || 'Bearer',
+    token: scopedToken.token,
+    tokenType: scopedToken.tokenType || 'Bearer',
     userAddress: account.userAddress,
   });
 
